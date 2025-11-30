@@ -14,7 +14,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
-st.set_page_config(page_title="ReserView Ultimate", layout="wide", page_icon="⚒️")
+st.set_page_config(page_title="Kelompok Kanara", layout="wide", page_icon="⚒️")
+
 st.markdown("""
     <style>
     html, body, [class*="css"] {
@@ -115,6 +116,7 @@ def create_volumetric_report_pdf(vol_gas_cap, vol_oil_zone, vol_total_res,
     buffer.seek(0)
     return buffer
 
+# --- FUNGSI REPORT EXCEL ---
 def create_volumetric_report_excel(vol_gas_cap, vol_oil_zone, vol_total_res, goc_input, woc_input, num_points, x_range, y_range, z_range, df):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -133,8 +135,8 @@ def create_volumetric_report_excel(vol_gas_cap, vol_oil_zone, vol_total_res, goc
     buffer.seek(0)
     return buffer
 
-st.markdown('<p class="main-title">⚒️ ReserView Ultimate</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Advanced Subsurface Mapping & Volumetric Analysis Tool</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">⚒️ Kelompok Kanara</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Pemetaan Bawah Permukaan IF-B 2025/2026</p>', unsafe_allow_html=True)
 
 if 'data_points' not in st.session_state:
     st.session_state['data_points'] = []
@@ -185,10 +187,22 @@ with st.expander("📂 Data Management & Input Panel", expanded=False):
 
 df = pd.DataFrame(st.session_state['data_points'])
 
-if df.empty:
-    st.warning("⚠️ No data available. Please add points manually or upload a file above.")
-else:
-    with st.sidebar:
+with st.sidebar:
+    st.markdown("### 👥 Anggota Kelompok")
+    st.markdown("""
+    <div style="background-color: #1E1E1E; padding: 10px; border-radius: 5px; border-left: 3px solid #FF4B4B;">
+        <small>
+        • <b>Muhammad Ruhul Jadid (123230046)</b><br>
+        • <b>Khatama Putra (123230053)</b><br>
+        • <b>Naurah Rifdah Nur R. (123230068)</b><br>
+        • <b>Gradiva Arya W. (123230089)</b><br>
+        • <b>Brian Zahran Putra (123230195)</b><br>
+        </small>
+    </div>
+    """, unsafe_allow_html=True)
+    st.divider()
+    
+    if not df.empty:
         st.header("🎛️ Control Panel")
         
         st.subheader("Fluid Contacts")
@@ -205,6 +219,9 @@ else:
         
         st.info(f"Dataset: {len(df)} Points\nMax Depth: {max_z} m")
 
+if df.empty:
+    st.warning("⚠️ No data available. Please add points manually or upload a file above.")
+else:
     if len(df) >= 4:
         df_unique = df.groupby(['X', 'Y'], as_index=False)['Z'].mean()
         grid_x, grid_y = np.meshgrid(
