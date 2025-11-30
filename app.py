@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, Rbf
+from scipy.spatial import qhull
 from datetime import datetime
 import io
 import json
@@ -15,6 +16,12 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
 st.set_page_config(page_title="Kelompok Kanara", layout="wide", page_icon="⚒️")
+
+# global var
+min_z = 0
+min_x = 0
+min_y = 0
+max_z = 10
 
 st.markdown("""
     <style>
@@ -207,8 +214,8 @@ with st.sidebar:
         
         st.subheader("Fluid Contacts")
         min_z, max_z = df['Z'].min(), df['Z'].max()
-        goc_input = st.slider("GOC (Gas-Oil)", float(min_z), float(max_z), float(min_z + (max_z - min_z) * 0.3))
-        woc_input = st.slider("WOC (Water-Oil)", float(min_z), float(max_z), float(min_z + (max_z - min_z) * 0.7))
+        goc_input = st.slider("GOC (Gas-Oil)", float(min_z), float(max_z) + 1, float(min_z + (max_z - min_z) * 0.3))
+        woc_input = st.slider("WOC (Water-Oil)", float(min_z), float(max_z) + 1, float(min_z + (max_z - min_z) * 0.7))
         
         st.subheader("Petrophysics")
         porosity = st.number_input("Porosity (ϕ)", 0.05, 0.40, 0.20, 0.01)
@@ -228,10 +235,48 @@ else:
             np.linspace(df['X'].min(), df['X'].max(), 100),
             np.linspace(df['Y'].min(), df['Y'].max(), 100)
         )
+
+        def safe_grid_interpolate(xy_df, xi, yi):
+            pts = np.vstack((xy_df['X'].values, xy_df['Y'].values)).T
+            vals = xy_df['Z'].values
+
+            # If too few unique points, can't interpolate
+            if pts.shape[0] < 3:
+                raise ValueError('Not enough unique XY points to interpolate.')
+
+            # If points are (nearly) colinear, add tiny jitter to make them full-dimensional
+            rank = np.linalg.matrix_rank(pts - pts.mean(axis=0))
+            if rank < 2:
+                rng = max(np.ptp(pts[:,0]), np.ptp(pts[:,1]), 1.0)
+                jitter_scale = rng * 1e-6
+                pts = pts + np.random.default_rng(0).normal(scale=jitter_scale, size=pts.shape)
+
+            # Try cubic, then linear, then nearest, then RBF as fallback
+            methods = ['cubic', 'linear', 'nearest']
+            for m in methods:
+                try:
+                    gz = griddata((pts[:,0], pts[:,1]), vals, (xi, yi), method=m)
+                    if gz is not None:
+                        return gz
+                except qhull.QhullError:
+                    # Qhull issues: try next method
+                    continue
+                except Exception:
+                    continue
+
+            # Final fallback: radial basis function interpolation
+            try:
+                rbf = Rbf(pts[:,0], pts[:,1], vals, function='thin_plate')
+                gz = rbf(xi, yi)
+                return gz
+            except Exception as e:
+                raise RuntimeError(f'All interpolation methods failed: {e}')
+
         try:
-            grid_z = griddata((df_unique['X'], df_unique['Y']), df_unique['Z'], (grid_x, grid_y), method='cubic')
-        except:
-            grid_z = griddata((df_unique['X'], df_unique['Y']), df_unique['Z'], (grid_x, grid_y), method='linear')
+            grid_z = safe_grid_interpolate(df_unique, grid_x, grid_y)
+        except Exception as e:
+            st.error(f"Interpolation failed: {e}")
+            grid_z = np.full_like(grid_x, np.nan, dtype=float)
 
         dx = (df['X'].max() - df['X'].min()) / 99
         dy = (df['Y'].max() - df['Y'].min()) / 99
@@ -263,16 +308,71 @@ else:
         with v_tab1:
             fig_2d = go.Figure(data=go.Contour(
                 z=grid_z, x=grid_x[0], y=grid_y[:,0],
-                colorscale='Jet', contours=dict(start=min_z, end=max_z, size=(max_z-min_z)/15, showlabels=True)
+                colorscale='RdYlGn', contours=dict(start=min_z, end=max_z, size=(max_z-min_z)/15, showlabels=True)
             ))
-            fig_2d.add_trace(go.Scatter(x=df['X'], y=df['Y'], mode='markers', marker=dict(color='black', size=5, opacity=0.5), name='Wells'))
+            # Add GOC and WOC isolines (line-only) on top of the filled contour
+            try:
+                fig_2d.add_trace(go.Contour(
+                    z=grid_z, x=grid_x[0], y=grid_y[:,0],
+                    contours=dict(start=goc_input, end=goc_input, size=(max_z-min_z)/1000, showlabels=False, coloring='lines'),
+                    line=dict(color='blue', width=3), showscale=False, name='GOC (line)'))
+            except Exception:
+                pass
+
+            try:
+                fig_2d.add_trace(go.Contour(
+                    z=grid_z, x=grid_x[0], y=grid_y[:,0],
+                    contours=dict(start=woc_input, end=woc_input, size=(max_z-min_z)/1000, showlabels=False, coloring='lines'),
+                    line=dict(color='blue', width=3), showscale=False, name='WOC (line)'))
+            except Exception:
+                pass
+
+            # Add textual annotations near the isolines so users can identify GOC/WOC
+            try:
+                # flatten grids and find nearest finite point to each contact
+                gz_flat = grid_z.flatten()
+                gx_flat = grid_x.flatten()
+                gy_flat = grid_y.flatten()
+                if np.isfinite(gz_flat).any():
+                    # GOC annotation
+                    if np.isfinite(goc_input):
+                        idx_goc = int(np.nanargmin(np.abs(gz_flat - goc_input)))
+                        x_goc = float(gx_flat[idx_goc])
+                        y_goc = float(gy_flat[idx_goc])
+                        fig_2d.add_annotation(x=x_goc, y=y_goc, text='GOC', showarrow=False,
+                                              font=dict(color='blue', size=12, family='Arial'),
+                                              bgcolor='rgba(255,255,255,0.7)')
+
+                    # WOC annotation
+                    if np.isfinite(woc_input):
+                        idx_woc = int(np.nanargmin(np.abs(gz_flat - woc_input)))
+                        x_woc = float(gx_flat[idx_woc])
+                        y_woc = float(gy_flat[idx_woc])
+                        fig_2d.add_annotation(x=x_woc, y=y_woc, text='WOC', showarrow=False,
+                                              font=dict(color='blue', size=12, family='Arial'),
+                                              bgcolor='rgba(255,255,255,0.7)')
+                    # Oil potential label: place near centroid of grid cells between the two contacts
+                    try:
+                        low_c = min(goc_input, woc_input)
+                        high_c = max(goc_input, woc_input)
+                        mask = np.isfinite(gz_flat) & (gz_flat >= low_c) & (gz_flat <= high_c)
+                        if np.any(mask):
+                            cx = float(np.nanmean(gx_flat[mask]))
+                            cy = float(np.nanmean(gy_flat[mask]))
+                            fig_2d.add_annotation(x=cx, y=cy, text='Oil potential', showarrow=False,
+                                                  font=dict(color='black', size=12, family='Arial', weight='bold'),
+                                                  bgcolor='rgba(255,255,255,0.75)')
+                    except Exception:
+                        pass
+            except Exception:
+                # don't break plotting if annotation placement fails
+                pass
+            fig_2d.add_trace(go.Scatter(x=df['X'], y=df['Y'], mode='markers', marker=dict(color='black', size=5, opacity=0.6), name='Wells'))
             fig_2d.update_layout(title="Structural Contour Map", height=600, plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_2d, use_container_width=True)
 
         with v_tab2:
             fig_3d = go.Figure(data=[go.Surface(z=grid_z, x=grid_x, y=grid_y, colorscale='Viridis', opacity=0.9)])
-            fig_3d.add_trace(go.Surface(z=goc_input*np.ones_like(grid_z), x=grid_x, y=grid_y, colorscale=[[0,'gold'],[1,'gold']], opacity=0.5, showscale=False, name='GOC'))
-            fig_3d.add_trace(go.Surface(z=woc_input*np.ones_like(grid_z), x=grid_x, y=grid_y, colorscale=[[0,'cyan'],[1,'cyan']], opacity=0.5, showscale=False, name='WOC'))
             
             fig_3d.update_layout(title="3D Reservoir Model", height=600, scene=dict(zaxis=dict(autorange="reversed")))
             st.plotly_chart(fig_3d, use_container_width=True)
@@ -288,8 +388,6 @@ else:
             
             fig_xs = go.Figure()
             fig_xs.add_trace(go.Scatter(x=grid_x[0, :], y=grid_z[idx_y, :], mode='lines', fill='tozeroy', line=dict(color='#2E86C1'), name='Structure'))
-            fig_xs.add_hline(y=goc_input, line_dash="dash", line_color="gold", annotation_text="GOC")
-            fig_xs.add_hline(y=woc_input, line_dash="dash", line_color="cyan", annotation_text="WOC")
             fig_xs.update_layout(title=f"Cross-Section @ Y={slice_y:.0f}", height=500, yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig_xs, use_container_width=True)
 
